@@ -1,17 +1,26 @@
 #include "PluginProcessor.h"
-#include "PluginEditor.h"
 
 //==============================================================================
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       )
+    : AudioProcessor(BusesProperties()
+#if !JucePlugin_IsMidiEffect
+#if !JucePlugin_IsSynth
+                         .withInput("Input", juce::AudioChannelSet::stereo(), true)
+#endif
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+#endif
+      )
 {
+    addParameter(delayTime = new juce::AudioParameterFloat("delayTime",
+                                                           "Delay Time",
+                                                           (float)MIN_DELAY_TIME,
+                                                           (float)MAX_DELAY_TIME,
+                                                           (float)DEFAULT_DELAY_TIME));
+    addParameter(delayGain = new juce::AudioParameterFloat("delayGain",
+                                                           "Delay Gain",
+                                                           (float)MIN_DELAY_GAIN,
+                                                           (float)MAX_DELAY_GAIN,
+                                                           (float)DEFAULT_DELAY_GAIN));
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
@@ -26,29 +35,29 @@ const juce::String AudioPluginAudioProcessor::getName() const
 
 bool AudioPluginAudioProcessor::acceptsMidi() const
 {
-   #if JucePlugin_WantsMidiInput
+#if JucePlugin_WantsMidiInput
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 bool AudioPluginAudioProcessor::producesMidi() const
 {
-   #if JucePlugin_ProducesMidiOutput
+#if JucePlugin_ProducesMidiOutput
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 bool AudioPluginAudioProcessor::isMidiEffect() const
 {
-   #if JucePlugin_IsMidiEffect
+#if JucePlugin_IsMidiEffect
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 double AudioPluginAudioProcessor::getTailLengthSeconds() const
@@ -58,8 +67,8 @@ double AudioPluginAudioProcessor::getTailLengthSeconds() const
 
 int AudioPluginAudioProcessor::getNumPrograms()
 {
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
+    return 1; // NB: some hosts don't cope very well if you tell them there are 0 programs,
+              // so this should be at least 1, even if you're not really implementing programs.
 }
 
 int AudioPluginAudioProcessor::getCurrentProgram()
@@ -67,28 +76,33 @@ int AudioPluginAudioProcessor::getCurrentProgram()
     return 0;
 }
 
-void AudioPluginAudioProcessor::setCurrentProgram (int index)
+void AudioPluginAudioProcessor::setCurrentProgram(int index)
 {
-    juce::ignoreUnused (index);
+    juce::ignoreUnused(index);
 }
 
-const juce::String AudioPluginAudioProcessor::getProgramName (int index)
+const juce::String AudioPluginAudioProcessor::getProgramName(int index)
 {
-    juce::ignoreUnused (index);
+    juce::ignoreUnused(index);
     return {};
 }
 
-void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String& newName)
+void AudioPluginAudioProcessor::changeProgramName(int index, const juce::String &newName)
 {
-    juce::ignoreUnused (index, newName);
+    juce::ignoreUnused(index, newName);
 }
 
 //==============================================================================
-void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
+    mSampleRate = sampleRate;
+
+    const int numOutputChannels = juce::AudioProcessor::getTotalNumOutputChannels();
+
+    // Extra samplesPerBlock is needed because we read/write in blocks, not continuous over samples
+    const int delayBufferSize = static_cast<int>(MAX_DELAY_TIME * (sampleRate + samplesPerBlock) + 1);
+
+    mDelayBuffer.setSize(numOutputChannels, delayBufferSize, false, false);
 }
 
 void AudioPluginAudioProcessor::releaseResources()
@@ -97,92 +111,141 @@ void AudioPluginAudioProcessor::releaseResources()
     // spare memory, etc.
 }
 
-bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool AudioPluginAudioProcessor::isBusesLayoutSupported(const BusesLayout &layouts) const
 {
-  #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
+#if JucePlugin_IsMidiEffect
+    juce::ignoreUnused(layouts);
     return true;
-  #else
+#else
     // This is the place where you check if the layout is supported.
     // In this template code we only support mono or stereo.
     // Some plugin hosts, such as certain GarageBand versions, will only
     // load plugins that support stereo bus layouts.
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono() && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
         return false;
 
-    // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
+        // This checks if the input layout matches the output layout
+#if !JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
         return false;
-   #endif
+#endif
 
     return true;
-  #endif
-}
-
-void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
-                                              juce::MidiBuffer& midiMessages)
-{
-    juce::ignoreUnused (midiMessages);
-
-    juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
-
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
-        juce::ignoreUnused (channelData);
-        // ..do something to the data...
-    }
+#endif
 }
 
 //==============================================================================
 bool AudioPluginAudioProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    return false;
 }
 
-juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
+juce::AudioProcessorEditor *AudioPluginAudioProcessor::createEditor()
 {
-    return new AudioPluginAudioProcessorEditor (*this);
+    return nullptr;
 }
 
 //==============================================================================
-void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+void AudioPluginAudioProcessor::getStateInformation(juce::MemoryBlock &destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-    juce::ignoreUnused (destData);
+    std::unique_ptr<juce::XmlElement> xml(new juce::XmlElement("Einverb"));
+
+    xml->setAttribute("delayTime", (double)*delayTime);
+    xml->setAttribute("delayGain", (double)*delayGain);
+
+    copyXmlToBinary(*xml, destData);
 }
 
-void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void AudioPluginAudioProcessor::setStateInformation(const void *data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-    juce::ignoreUnused (data, sizeInBytes);
+    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
+
+    if (xmlState.get() != nullptr)
+        if (xmlState->hasTagName("Einverb"))
+        {
+            *delayTime = (float)xmlState->getDoubleAttribute("delayTime", DEFAULT_DELAY_TIME);
+            *delayGain = (float)xmlState->getDoubleAttribute("delayGain", DEFAULT_DELAY_GAIN);
+        }
 }
 
 //==============================================================================
 // This creates new instances of the plugin..
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();
+}
+
+void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
+                                             juce::MidiBuffer &midiMessages)
+{
+    juce::ignoreUnused(midiMessages);
+
+    juce::ScopedNoDenormals noDenormals;
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    // Clear buffers
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+
+    const int bufferLength = buffer.getNumSamples();
+    const int delayBufferLength = mDelayBuffer.getNumSamples();
+
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    {
+        const float *bufferData = buffer.getReadPointer(channel);
+        const float *delayBufferData = mDelayBuffer.getReadPointer(channel);
+
+        fillDelayBuffer(channel, bufferLength, delayBufferLength, bufferData);
+        getFromDelayBuffer(buffer, channel, bufferLength, delayBufferLength, delayBufferData);
+    }
+
+    // Increment delay buffer write position w/ wrapping
+    mWritePosition = (mWritePosition + bufferLength) % delayBufferLength;
+}
+
+void AudioPluginAudioProcessor::fillDelayBuffer(const int channel, const int bufferLength, const int delayBufferLength, const float *bufferData)
+{
+    float gain = *delayGain;
+
+    // Copy data from main buffer to delay buffer
+    if (delayBufferLength > bufferLength + mWritePosition)
+    {
+        // We have enough room to copy buffer to delay buffer without wrapping
+
+        mDelayBuffer.copyFromWithRamp(channel, mWritePosition, bufferData, bufferLength, gain, gain);
+    }
+    else
+    {
+        // We need to split buffer across end and wrapped start of delay buffer
+
+        const int delayBufferRemaining = delayBufferLength - mWritePosition;
+
+        mDelayBuffer.copyFromWithRamp(channel, mWritePosition, bufferData, delayBufferRemaining, gain, gain);
+        mDelayBuffer.copyFromWithRamp(channel, 0, bufferData + delayBufferRemaining, bufferLength - delayBufferRemaining, 0.8F, 0.8F);
+    }
+}
+
+void AudioPluginAudioProcessor::getFromDelayBuffer(juce::AudioBuffer<float> &buffer, const int channel, const int bufferLength, const int delayBufferLength, const float *delayBufferData)
+{
+    float time = *delayTime;
+
+    const int delayOffset = static_cast<int>(mSampleRate * time);
+    const int readPosition = (delayBufferLength + mWritePosition - delayOffset) % delayBufferLength;
+
+    if (delayBufferLength > bufferLength + readPosition)
+    {
+        // We have enough room to add delay buffer to buffer without wrapping
+
+        buffer.addFrom(channel, 0, delayBufferData + readPosition, bufferLength);
+    }
+    else
+    {
+        // We need to split the add from the delay buffer across end and wrapped start of buffer
+
+        const int bufferRemaining = delayBufferLength - readPosition;
+
+        buffer.addFrom(channel, 0, delayBufferData + readPosition, bufferRemaining);
+        buffer.addFrom(channel, bufferRemaining, delayBufferData, bufferLength - bufferRemaining);
+    }
 }
