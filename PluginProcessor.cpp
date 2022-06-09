@@ -148,7 +148,9 @@ juce::AudioProcessorEditor *AudioPluginAudioProcessor::createEditor()
 //==============================================================================
 void AudioPluginAudioProcessor::getStateInformation(juce::MemoryBlock &destData)
 {
-    std::unique_ptr<juce::XmlElement> xml(new juce::XmlElement("Einverb"));
+    // TODO: make "Seinkun" here and in the other location a shared constant
+    // - or use something appropriate like the juce product name?
+    std::unique_ptr<juce::XmlElement> xml(new juce::XmlElement("Seinkun"));
 
     xml->setAttribute("delayTime", (double)*delayTime);
     xml->setAttribute("delayGain", (double)*delayGain);
@@ -161,7 +163,7 @@ void AudioPluginAudioProcessor::setStateInformation(const void *data, int sizeIn
     std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
 
     if (xmlState.get() != nullptr)
-        if (xmlState->hasTagName("Einverb"))
+        if (xmlState->hasTagName("Seinkun"))
         {
             *delayTime = (float)xmlState->getDoubleAttribute("delayTime", DEFAULT_DELAY_TIME);
             *delayGain = (float)xmlState->getDoubleAttribute("delayGain", DEFAULT_DELAY_GAIN);
